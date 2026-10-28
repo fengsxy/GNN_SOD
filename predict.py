@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from torch_geometric.loader import DataLoader
 from Dataset import MyDataset
 from Model import GCN
-from runtime import check_config, configure
+from runtime import check_config, check_model_version, configure
 
 
 @torch.no_grad()
@@ -19,6 +19,7 @@ def predict(args):
         raise ValueError("--batch-size must be positive")
     dataset = MyDataset(args.data, require_target=False)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    check_model_version(checkpoint)
     check_config(checkpoint["config"], dataset.config)
     model = GCN(dataset.config["node_channels"], len(dataset.config["segments"])).to(device)
     model.load_state_dict(checkpoint["model_state"])

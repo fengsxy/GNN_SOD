@@ -1,4 +1,4 @@
-"""Train the graph decoder from cached VGG19/SNIC features on CPU or CUDA."""
+"""Train the graph decoder from cached CNN/SNIC features on CPU or CUDA."""
 import argparse
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ from torch_geometric.loader import DataLoader
 from Dataset import MyDataset
 from Model import GCN
 from losses import mixed_loss
-from runtime import check_config, configure
+from runtime import check_config, check_model_version, configure
 
 
 @torch.no_grad()
@@ -41,6 +41,7 @@ def train(args):
     start, best, history = 0, float("inf"), []
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
+        check_model_version(checkpoint)
         check_config(checkpoint["config"], dataset.config)
         model.load_state_dict(checkpoint["model_state"])
         optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -78,7 +79,7 @@ def train(args):
             improved = record["val_mae"] < best
             best = min(best, record["val_mae"])
         history.append(record)
-        checkpoint = {"format_version": 1, "config": dataset.config, "epoch": epoch,
+        checkpoint = {"format_version": 2, "config": dataset.config, "epoch": epoch,
                       "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
                       "best_val_mae": best, "history": history, "rng_state": torch.get_rng_state()}
         temporary = out / "latest.tmp.pt"

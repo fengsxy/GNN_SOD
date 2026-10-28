@@ -3,6 +3,11 @@ import numpy as np
 import torch
 
 
+def check_model_version(checkpoint):
+    if checkpoint.get("format_version") != 2:
+        raise ValueError("Incompatible decoder checkpoint: version 2 uses sequential fusion; retrain the decoder")
+
+
 def configure(device="cpu", threads=2, seed=0):
     if threads < 1:
         raise ValueError("--threads must be positive")

@@ -30,7 +30,7 @@ class GCN(nn.Module):
         self.reverse_reduce = nn.ModuleList([
             nn.ModuleList([conv_block(w, w) for w in widths]) for _ in range(n_scales)])
         self.branch_fusion = nn.ModuleList([
-            nn.ModuleList([conv_block(2 * w + (32 if stage else 0), w)
+            nn.ModuleList([conv_block(2 * w + (fused[stage - 1] if stage else 0), w)
                            for stage, w in enumerate(widths)]) for _ in range(n_scales)])
         self.scale_fusion = nn.ModuleList([conv_block(w, f) for w, f in zip(widths, fused)])
         self.side_heads = nn.ModuleList([nn.Conv2d(f, 1, 1) for f in fused])
@@ -71,8 +71,8 @@ class GCN(nn.Module):
                     self.graph_layers[scale][stage](nodes[scale], graph.edge_index,
                                                     graph.edge_attr), graph.batch)))
                 mapped = self.reverse_reduce[scale][stage](self.reverse_map(nodes[scale], graph))
-                # Released forward() and Fig. 2 reuse the FIRST fused map at all later stages.
-                parts = [mapped] + ([fused_maps[0]] if stage else []) + [cnn[stage]]
+                # Manuscript Fig. 2 and Eq. (6): feed the immediately previous fused feature.
+                parts = [mapped] + ([fused_maps[-1]] if stage else []) + [cnn[stage]]
                 branch_maps.append(self.branch_fusion[scale][stage](torch.cat(parts, dim=1)))
             fused = self.scale_fusion[stage](torch.stack(branch_maps).sum(dim=0))
             fused_maps.append(fused)
