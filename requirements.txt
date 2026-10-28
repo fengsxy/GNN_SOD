@@ -1,0 +1,9 @@
+# Install CPU torch/torchvision first; see README.
+torch==2.5.1
+torchvision==0.20.1
+torch-geometric==2.6.1
+numpy>=1.26,<3
+scipy>=1.11,<2
+Pillow>=10,<13
+scikit-image==0.25.2
+pysnic==1.0.4
