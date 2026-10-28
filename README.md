@@ -2,7 +2,7 @@
 
 光学遥感图像显著性检测：CNN 离线特征 → 多尺度 SNIC 图 → GatedEdgeConv 解码器 → 显著图。
 
-本版本补齐原仓库缺失的预处理接口，并修复 CPU、数据缓存、通道、尺寸及批处理问题。**这是运行流程修复，不是论文精度复现。** 原始 `Solver`、在 EORSSD 上微调过的编码器权重和训练配方未提供；默认分支显式使用 torchvision VGG19，F6 采用 pool5，加载 ImageNet 权重；离线自检使用固定随机权重。另外新增可选的 EGNet VGG16+Conv6 编码器，已用官方 DUTS 显著性训练权重验证。VGG16 与文稿所写 VGG19 的冲突尚未确认，因此不自动替换默认分支。完整差异见 [修复说明](docs/CPU_REPAIR.md)。
+本版本补齐原仓库缺失的预处理接口，并修复 CPU、数据缓存、通道、尺寸及批处理问题。**这是运行流程修复，不是论文精度复现。** 原始 `Solver`、在 EORSSD 上微调过的编码器权重和训练配方未提供；默认分支显式使用 torchvision VGG19，F6 采用 pool5，加载 ImageNet 权重；离线自检使用固定随机权重。另外提供可选 EGNet VGG16+Conv6 和 ResNet50+ConvertLayer 编码器，均已用官方 DUTS 显著性训练权重验证。两者与文稿所写 VGG19 的冲突尚未确认，因此不自动替换默认分支。完整差异见 [修复说明](docs/CPU_REPAIR.md)。
 
 ## 安装
 
@@ -79,7 +79,26 @@ python Main.py --data runs/egnet_train --out-dir runs/egnet_model --epochs 20 --
 python predict.py --data runs/egnet_test --checkpoint runs/egnet_model/latest.pt --out-dir runs/egnet_predictions
 ```
 
-适配器保留官方 3×3 池化、三层 Conv6 和 BGR/像素均值预处理，只加载经过严格键名/尺寸校验的编码器权重；EGNet 自己的显著性/边缘解码器不参与本图网络。真实权重测试中，适配器的七个输出特征与官方 `vgg.py` 的对应特征逐元素完全一致。两个编码器的缓存不得混用。来源、对应关系及实测见 [EGNet 核验记录](docs/EGNET_CHECK.md)。
+适配器保留官方 3×3 池化、三层 Conv6 和 BGR/像素均值预处理，只加载经过严格键名/尺寸校验的编码器权重；EGNet 自己的显著性/边缘解码器不参与本图网络。真实权重测试中，适配器的七个输出特征与官方 `vgg.py` 的对应特征逐元素完全一致。不同编码器的缓存不得混用。来源、对应关系及实测见 [EGNet 核验记录](docs/EGNET_CHECK.md)。
+
+## 可选 EGNet ResNet50 显著性预训练编码器
+
+使用同一官方模型包中的 `epoch_resnet.pth`。此分支严格加载 ResNet50 主干和训练过的 ConvertLayer，将五级通道从 64/256/512/1024/2048 转为 128/256/512/512/512，支持现有图网络的 1536 维节点输入和四级 CNN 融合。
+
+```bash
+python smoke_test.py --work-dir runs/resnet_smoke --size 256 --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
+```
+
+这条命令使用本地官方权重，生成合成样本并测试完整预处理、batch 2 训练、batch 1 续训、验证选模和预测。真实数据使用：
+
+```bash
+python pre_process.py --manifest data/train.txt --out-dir runs/resnet_train --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
+python pre_process.py --manifest data/test.txt --out-dir runs/resnet_test --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
+python Main.py --data runs/resnet_train --out-dir runs/resnet_model --epochs 20 --batch-size 2
+python predict.py --data runs/resnet_test --checkpoint runs/resnet_model/latest.pt --out-dir runs/resnet_predictions
+```
+
+EGNet 的 ResNet 并非 torchvision 默认结构：下采样 stride 位于 bottleneck 的第一个 1×1 卷积，最大池化采用 ceil_mode，layer4 取消下采样并使用 dilation=2。适配器保留这些行为，官方参考特征对比通过；不使用随机通道投影，也不加载 EGNet 自带的显著性解码器。256 输入时的五级空间尺寸为 128/65/33/17/17，与文稿 VGG 六个 Block 的尺寸不完全相同。代码能运行不等于确认了原论文的主干身份。详细结果见 [ResNet 核验](docs/EGNET_RESNET_CHECK.md)。
 
 ## 训练与续训
 

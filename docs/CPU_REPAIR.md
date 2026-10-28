@@ -35,7 +35,7 @@
 
 ## 后续找到的 EGNet 候选编码器
 
-依据原脚本的文件名、Solver 构造形式和 BGR 均值，找到并下载了 EGNet 官方的 epoch_vgg.pth / epoch_resnet.pth。已新增可选 EGNet VGG16+Conv6 编码器，并与官方实现逐元素核对；详细来源与结果见 [EGNet 核验记录](EGNET_CHECK.md)。它解决了“找到一套可用显著性预训练编码器”的问题，但并未确认原文实验的 VGG19/EORSSD 微调身份。默认 VGG19 分支不被静默替换。
+依据原脚本的文件名、Solver 构造形式和 BGR 均值，找到并下载了 EGNet 官方的 epoch_vgg.pth / epoch_resnet.pth。已新增可选 EGNet VGG16+Conv6 和 ResNet50+ConvertLayer 编码器，并与官方实现逐元素核对；详细来源与结果见 [EGNet 核验记录](EGNET_CHECK.md)。它解决了“找到一套可用显著性预训练编码器”的问题，但并未确认原文实验的 VGG19/EORSSD 微调身份。默认 VGG19 分支不被静默替换。
 
 ## 验证方式
 

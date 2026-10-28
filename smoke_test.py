@@ -12,7 +12,15 @@ import torch
 ROOT = Path(__file__).resolve().parent
 
 
-def run(work_dir, size=64):
+def run(work_dir, size=64, encoder="vgg19", encoder_checkpoint=None):
+    if encoder != "vgg19" and not encoder_checkpoint:
+        raise ValueError("EGNet smoke tests require --encoder-checkpoint")
+    encoder_args = ["--encoder", encoder, "--weights", "none"]
+    if encoder_checkpoint:
+        checkpoint_path = Path(encoder_checkpoint).resolve()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(checkpoint_path)
+        encoder_args.extend(["--encoder-checkpoint", str(checkpoint_path)])
     work = Path(work_dir).resolve()
     if work.exists() and any(work.iterdir()):
         raise ValueError("Smoke-test work directory must be empty")
@@ -35,7 +43,7 @@ def run(work_dir, size=64):
 
     for split in ("train", "val", "predict"):
         command("pre_process.py", "--manifest", work / f"{split}.txt", "--out-dir", work / split,
-                "--weights", "none", "--size", size, "--segments", 50, 100, "--device", "cpu")
+                *encoder_args, "--size", size, "--segments", 50, 100, "--device", "cpu")
     command("Main.py", "--data", work / "train", "--val-data", work / "val",
             "--out-dir", work / "model", "--epochs", 1, "--batch-size", 2)
     command("Main.py", "--data", work / "train", "--val-data", work / "val",
@@ -50,7 +58,8 @@ def run(work_dir, size=64):
     with Image.open(work / "predictions/000000.png") as prediction:
         assert prediction.mode == "L" and prediction.size == (86, 66)
     summary = {"status": "passed", "device": "cpu", "size": size, "segments": [50, 100],
-               "knn": 32, "encoder_weights": "random, seed=0 (smoke only)",
+               "knn": 32, "encoder": state["config"]["encoder"],
+               "encoder_weights": "local checkpoint" if encoder_checkpoint else "random, seed=0 (smoke only)",
                "train_images": 2, "validation_images": 1, "prediction_images": 1,
                "train_batch_sizes": [2, 1], "epochs_including_resume": 2,
                "history": state["history"], "seconds": round(time.perf_counter() - started, 2)}
@@ -63,5 +72,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--work-dir", default="runs/smoke")
     p.add_argument("--size", type=int, default=64)
+    p.add_argument("--encoder", choices=["vgg19", "egnet-vgg16", "egnet-resnet50"], default="vgg19")
+    p.add_argument("--encoder-checkpoint")
     args = p.parse_args()
-    run(args.work_dir, args.size)
+    run(args.work_dir, args.size, args.encoder, args.encoder_checkpoint)

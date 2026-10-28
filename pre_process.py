@@ -10,7 +10,7 @@ from skimage.color import rgb2lab
 from pysnic.algorithms.snic import snic
 import torch
 from torch.nn import functional as F
-from encoder import FeatureEncoder, EGNetVGG16Encoder
+from encoder import FeatureEncoder, EGNetVGG16Encoder, EGNetResNet50Encoder
 from runtime import configure
 
 
@@ -71,6 +71,8 @@ def preprocess(args):
         raise ValueError(f"Cache directory must be empty to avoid mixing datasets: {out}")
     if args.encoder == "egnet-vgg16":
         encoder = EGNetVGG16Encoder(args.encoder_checkpoint)
+    elif args.encoder == "egnet-resnet50":
+        encoder = EGNetResNet50Encoder(args.encoder_checkpoint)
     else:
         encoder = FeatureEncoder(args.weights, args.seed, args.encoder_checkpoint)
     encoder = encoder.to(device)
@@ -140,7 +142,7 @@ def parser():
     p.add_argument("--segments", type=int, nargs="+", default=[50, 100])
     p.add_argument("--knn", type=int, default=32)
     p.add_argument("--weights", choices=["imagenet", "none"], default="imagenet")
-    p.add_argument("--encoder", choices=["vgg19", "egnet-vgg16"], default="vgg19")
+    p.add_argument("--encoder", choices=["vgg19", "egnet-vgg16", "egnet-resnet50"], default="vgg19")
     p.add_argument("--encoder-checkpoint")
     p.add_argument("--device", default="cpu")
     p.add_argument("--threads", type=int, default=2)

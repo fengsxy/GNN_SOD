@@ -61,9 +61,13 @@ GNN_SOD_EGNET_REFERENCE=/path/to/official/vgg.py \
 python -m pytest -q
 ```
 
-本次包含实际官方权重的完整测试结果：**11 passed in 9.37s**。未提供这些路径时，官方参考对比测试跳过，其余 10 项离线测试仍可运行。
+VGG16 接入阶段测试结果为 11 passed in 9.37s。随后加入 ResNet50 官方参考对比后，完整测试为 **12 passed in 12.91s**；不提供任何官方权重/参考路径时，2 项外部参考测试跳过，其余 10 项离线测试可运行。
 
 另外，已对两张合成图做 256×256 真实 SNIC 与 EGNet 特征缓存，使用修正为逐级融合的图解码器完成 batch=2 的一次 Adam 更新，五头总损失为 13.032805，数值有限。随后通过独立的无标签图像完成 checkpoint 加载和预测，输出为原始 86×66 灰度 PNG。该损失仅说明流程可执行，不是模型质量指标。
+
+## ResNet 分支
+
+已另行完成 epoch_resnet.pth 的严格加载、原始/转换后特征核对及图网络完整 CPU 流程。需保留 EGNet 的特殊 stride、ceil-mode 池化、末级空洞卷积和训练过的 ConvertLayer；详见 [ResNet 核验记录](EGNET_RESNET_CHECK.md)。
 
 ## 尚不能确认的内容
 
@@ -72,4 +76,4 @@ python -m pytest -q
 - 缺失 Solver 的特征返回细节和原实验 checkpoint 未找回。结构尺寸匹配不等于恢复了原实验模型。
 - 本次的图网络训练样本是合成图，没有全量 EORSSD 指标或跨数据集结论。
 
-因此当前保持默认 VGG19 可运行分支，同时提供已经实际核验的 EGNet VGG16 可选分支，等待原训练记录或原权重解决文稿与实现的身份问题。
+因此当前保持默认 VGG19 可运行分支，同时提供已经实际核验的 EGNet VGG16 和 ResNet50 可选分支，等待原训练记录或原权重解决文稿与实现的身份问题。
