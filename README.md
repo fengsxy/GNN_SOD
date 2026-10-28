@@ -1,8 +1,8 @@
 # GNN_SOD：可在 CPU 运行的修复版
 
-光学遥感图像显著性检测：VGG19 离线特征 → 多尺度 SNIC 图 → GatedEdgeConv 解码器 → 显著图。
+光学遥感图像显著性检测：CNN 离线特征 → 多尺度 SNIC 图 → GatedEdgeConv 解码器 → 显著图。
 
-本版本补齐原仓库缺失的预处理接口，并修复 CPU、数据缓存、通道、尺寸及批处理问题。**这是运行流程修复，不是论文精度复现。** 原始 `Solver`、在 EORSSD 上微调过的编码器权重和训练配方未提供；这里显式使用 torchvision VGG19，F6 采用 pool5。默认加载 ImageNet 权重，离线自检使用固定随机权重。完整差异见 [修复说明](docs/CPU_REPAIR.md)。
+本版本补齐原仓库缺失的预处理接口，并修复 CPU、数据缓存、通道、尺寸及批处理问题。**这是运行流程修复，不是论文精度复现。** 原始 `Solver`、在 EORSSD 上微调过的编码器权重和训练配方未提供；默认分支显式使用 torchvision VGG19，F6 采用 pool5，加载 ImageNet 权重；离线自检使用固定随机权重。另外新增可选的 EGNet VGG16+Conv6 编码器，已用官方 DUTS 显著性训练权重验证。VGG16 与文稿所写 VGG19 的冲突尚未确认，因此不自动替换默认分支。完整差异见 [修复说明](docs/CPU_REPAIR.md)。
 
 ## 安装
 
@@ -68,6 +68,19 @@ python pre_process.py --manifest data/train.txt --out-dir runs/train_cache --enc
 
 `encoder.pt` 应为 `FeatureEncoder.state_dict()`，或 `{"encoder_state": state_dict}`。加载采用严格键名/尺寸检查；未知结构的旧 `epoch_resnet.pth` 不会被自动转换。本版本**没有补造原编码器的微调过程**。更换编码器后需重新生成所有缓存并重新训练解码器。`--weights none --seed 0` 仅供调试，不能作为论文预训练模型。
 
+## 可选 EGNet VGG16 显著性预训练编码器
+
+已下载并验证 [EGNet 官方模型包](https://drive.google.com/open?id=17Ffc6V5EiujtcFKupsJXhtlQ3cLK5OGp)。解压得到 `epoch_vgg.pth` 与 `epoch_resnet.pth`，此适配器使用前者。该权重经过 DUTS 显著性训练，包含额外的三层 Conv6 卷积；它与仅有 ImageNet 初始化的 `vgg16_20M.pth` 不同，也不能冒充 EORSSD 微调模型。
+
+```bash
+python pre_process.py --manifest data/train.txt --out-dir runs/egnet_train --encoder egnet-vgg16 --encoder-checkpoint /path/to/epoch_vgg.pth
+python pre_process.py --manifest data/test.txt --out-dir runs/egnet_test --encoder egnet-vgg16 --encoder-checkpoint /path/to/epoch_vgg.pth
+python Main.py --data runs/egnet_train --out-dir runs/egnet_model --epochs 20 --batch-size 2
+python predict.py --data runs/egnet_test --checkpoint runs/egnet_model/latest.pt --out-dir runs/egnet_predictions
+```
+
+适配器保留官方 3×3 池化、三层 Conv6 和 BGR/像素均值预处理，只加载经过严格键名/尺寸校验的编码器权重；EGNet 自己的显著性/边缘解码器不参与本图网络。真实权重测试中，适配器的七个输出特征与官方 `vgg.py` 的对应特征逐元素完全一致。两个编码器的缓存不得混用。来源、对应关系及实测见 [EGNet 核验记录](docs/EGNET_CHECK.md)。
+
 ## 训练与续训
 
 ```bash
@@ -96,16 +109,16 @@ python predict.py --data runs/test_cache --checkpoint runs/model/best.pt --out-d
 
 没有验证集时，改用 `latest.pt`。输出 `000000.png` 等单通道 8-bit 显著图，尺寸与各自原图一致；`predictions.json` 记录输出文件与输入图像的对应关系。支持 `--batch-size`，输入清单可没有标签。
 
-缓存和检查点记录编码器权重摘要、图尺度、K、图构造方式、尺寸和特征接口，不兼容时会明确报错。旧版本 `.pkl` 和模型权重不兼容此版本，需从原图重建缓存并重新训练。缓存、模型和预测输出不纳入 Git。
+缓存和检查点记录编码器权重摘要、图尺度、K、图构造方式、尺寸和特征接口，不兼容时会明确报错。旧版本 `.pkl` 不兼容此版本，需从原图重建缓存并重新训练。首版 CPU 修复的 format_version=1 检查点复用了首级融合特征，当前按图 2 改为逐级融合并使用 format_version=2，旧解码器检查点需重新训练；兼容的特征缓存可继续使用。缓存、模型和预测输出不纳入 Git。
 
 ## 方法接口
 
-| 用途 | VGG19 特征 | 通道/输出 |
+| 用途 | 默认 VGG19 特征（EGNet 可选分支见上文） | 通道/输出 |
 |---|---|---|
 | 图节点 | F4=relu4_4、F5=relu5_4、F6=pool5；双线性放大后 sigmoid、区域均值 | 1536 |
 | 四级 CNN 融合 | F5、F4、F3=relu3_4、F2=relu2_2 | 512、512、256、128 |
 | 各尺度图卷积 | 保留原 GatedEdgeConv 和 GraphSizeNorm | 64→32→16→8 |
-| 多尺度融合 | 各分支相加、1×1 卷积；沿用原代码首级融合图的跨级连接 | 32、16、8、4 |
+| 多尺度融合 | 各分支相加、1×1 卷积；按图 2 和式（6）逐级传入上一层融合特征 | 32、16、8、4 |
 | 显著性输出 | 四个侧输出和一个融合输出 | 均为 `[B,1,H,W]` |
 
 坐标只用于构图，不混入 1536 维 CNN 节点特征。图权重与原代码一致：归一化质心距离经 `exp(-distance / (0.1*pi)^2)` 加权，再执行原来的列/行两遍 KNN 稀疏化，去掉自环。该操作不保证每个节点最后恰有 K 条边，也不保证图对称。

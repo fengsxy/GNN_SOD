@@ -7,7 +7,7 @@ from encoder import FeatureEncoder
 from losses import mixed_loss
 from Model import GCN
 from pre_process import pool_regions, spatial_graph
-from runtime import check_config, configure
+from runtime import check_config, check_model_version, configure
 
 
 @pytest.fixture(autouse=True)
@@ -106,3 +106,34 @@ def test_graph_retains_legacy_sparsification_without_self_loops():
     assert torch.bincount(edges[1], minlength=4).max() <= 2
     distances = np.linalg.norm(coord[edges[0]] - coord[edges[1]], axis=1)
     np.testing.assert_allclose(weights.numpy(), np.exp(-distances / (.1 * np.pi) ** 2), rtol=1e-6)
+
+
+def test_later_stages_receive_the_immediately_previous_fusion():
+    model = GCN().eval()
+    batch = next(iter(DataLoader([make_sample((5, 7))], batch_size=1)))
+    observed = []
+    handles = []
+    # Intervene on each fused feature with a different marker. Later branches
+    # must receive their direct predecessor, not the first stage repeatedly.
+    for stage, layer in enumerate(model.scale_fusion):
+        handles.append(layer.register_forward_hook(
+            lambda module, args, output, value=stage + 1: torch.full_like(output, value)))
+    for branch in model.branch_fusion:
+        for stage in range(1, 4):
+            width, previous = (64, 32, 16, 8)[stage], (32, 16, 8, 4)[stage - 1]
+            def capture(module, args, w=width, p=previous, expected=stage):
+                torch.testing.assert_close(args[0][:, w:w+p],
+                                           torch.full_like(args[0][:, w:w+p], expected))
+                observed.append(expected)
+            handles.append(branch[stage].register_forward_pre_hook(capture))
+    with torch.no_grad():
+        model(batch)
+    assert sorted(observed) == [1, 1, 2, 2, 3, 3]
+    for handle in handles:
+        handle.remove()
+
+
+def test_rejects_checkpoints_from_the_first_fusion_implementation():
+    check_model_version({"format_version": 2})
+    with pytest.raises(ValueError, match="sequential fusion"):
+        check_model_version({"format_version": 1})

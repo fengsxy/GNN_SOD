@@ -1,4 +1,4 @@
-"""Build portable, versioned SNIC/VGG19 caches from an explicit image manifest."""
+"""Build portable, versioned SNIC/CNN caches from an explicit image manifest."""
 import argparse
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from skimage.color import rgb2lab
 from pysnic.algorithms.snic import snic
 import torch
 from torch.nn import functional as F
-from encoder import FeatureEncoder
+from encoder import FeatureEncoder, EGNetVGG16Encoder
 from runtime import configure
 
 
@@ -69,13 +69,17 @@ def preprocess(args):
     out = Path(args.out_dir)
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"Cache directory must be empty to avoid mixing datasets: {out}")
-    encoder = FeatureEncoder(args.weights, args.seed, args.encoder_checkpoint).to(device)
+    if args.encoder == "egnet-vgg16":
+        encoder = EGNetVGG16Encoder(args.encoder_checkpoint)
+    else:
+        encoder = FeatureEncoder(args.weights, args.seed, args.encoder_checkpoint)
+    encoder = encoder.to(device)
     config = {"schema_version": 1, "size": args.size, "segments": args.segments, "knn": args.knn,
-              "encoder": "vgg19-pool5", "feature_signature": encoder.fingerprint(),
+              "encoder": encoder.name, "feature_signature": encoder.fingerprint(),
               "weights": "checkpoint" if args.encoder_checkpoint else args.weights,
               "seed": args.seed, "node_channels": 1536, "node_activation": "sigmoid",
               "topology": "legacy-two-pass-knn-v1",
-              "preprocess": "rgb-imagenet-bilinear-mask-nearest-v1"}
+              "preprocess": encoder.preprocessing}
     out.mkdir(parents=True, exist_ok=True)
     entries = []
     for index, (image_path, mask_path) in enumerate(samples):
@@ -136,6 +140,7 @@ def parser():
     p.add_argument("--segments", type=int, nargs="+", default=[50, 100])
     p.add_argument("--knn", type=int, default=32)
     p.add_argument("--weights", choices=["imagenet", "none"], default="imagenet")
+    p.add_argument("--encoder", choices=["vgg19", "egnet-vgg16"], default="vgg19")
     p.add_argument("--encoder-checkpoint")
     p.add_argument("--device", default="cpu")
     p.add_argument("--threads", type=int, default=2)
