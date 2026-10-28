@@ -1,4 +1,4 @@
-# Install CPU torch/torchvision first; see README.
+# Shared dependencies. Use requirements-cpu.txt or requirements-gpu.txt to select the PyTorch build.
 torch==2.5.1
 torchvision==0.20.1
 torch-geometric==2.6.1

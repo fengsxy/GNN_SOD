@@ -16,7 +16,7 @@
 
 ## 回归测试
 
-在提供官方 EGNet VGG16/ResNet50 权重和参考代码后执行完整 pytest：**12 passed in 12.91s**。不提供外部文件时，10 项测试可离线执行，2 项官方权重/参考代码对比测试跳过。
+在提供官方 EGNet VGG16/ResNet50 权重和参考代码后执行完整 pytest：**12 passed, 2 skipped in 14.97s**。新增的 2 项 CUDA 测试因本机无 GPU 跳过。不提供外部文件时，另有 2 项官方权重/参考代码对比测试跳过，10 项 CPU 测试可离线执行。
 
 覆盖内容：不同节点数的批量反投影及梯度、均值池化及梯度、batch 1/2 所有训练参数的梯度和实际更新、空/满掩码、VGG19 层形状及本地权重往返、编码器不兼容拒绝、图边权与稀疏化、逐级融合真实连接来源的干预测试、旧解码器版本拒绝，以及两种 EGNet 官方权重的逐元素特征对比。ResNet 对比包含 batch=1 的 256×256 输入和 batch=2 的 255×257 奇数尺寸输入，覆盖 ceil_mode 边界行为；还验证缺少通道投影权重时明确拒绝加载。
 
@@ -47,6 +47,29 @@ python smoke_test.py --work-dir runs/sequential256 --size 256
 三种编码器均通过实际预处理、图网络训练和 checkpoint 加载/预测，均未在此次验证中进行 EORSSD 编码器微调。EGNet 官方模型的下载来源、文件摘要、参考实现逐元素一致性验证见 [EGNet 核验记录](EGNET_CHECK.md)。
 
 ResNet 完整自检单次墙钟时间为 39.44 s，包含进程启动及预处理；同机还有其他测试运行，不能据此进行速度排名。新增编码器参数后，默认随机 VGG19 的 64×64 自检也重新通过（25.60 s），确认原离线入口仍可运行。详细 ResNet 结构与命令见 [ResNet 核验记录](EGNET_RESNET_CHECK.md)。
+
+## CPU / GPU 环境与运行入口
+
+新增 `requirements-cpu.txt` 和 `requirements-gpu.txt`，分别选择 PyTorch 2.5.1 / torchvision 0.20.1 的 CPU 和 CUDA 12.4 构建，共用 `requirements.txt` 中的其余依赖。版本组合来自 [PyTorch 官方历史版本安装页](https://pytorch.org/get-started/previous-versions/#v251)。
+
+在上述 Python 3.12 环境中，对两份依赖文件执行 `pip install --dry-run --report ... -r ...`，均成功完成解析。CPU 文件与当前环境一致；GPU 文件解析为 `torch==2.5.1+cu124`、`torchvision==0.20.1+cu124` 及其 CUDA 运行库依赖。此检查未安装 GPU 环境，也未执行 CUDA 运算。
+
+`smoke_test.py --device` 会将设备参数传给预处理、训练、续训和预测的全部子进程，结果 JSON 记录设备、Python/PyTorch/CUDA 版本及 GPU 名称。新增参数后重新执行：
+
+```bash
+python smoke_test.py --work-dir runs/device_cpu_smoke --device cpu
+```
+
+64×64 全流程通过，耗时 27.04 s，训练损失为 13.150433 和 12.966937。另检查无 CUDA 时运行 `--device cuda` 会在创建输出目录前报错。
+
+本机 `torch.cuda.is_available()` 为 False，没有 NVIDIA 设备或 `nvidia-smi`。GPU 实机验证可在配置好的机器上执行：
+
+```bash
+python smoke_test.py --work-dir runs/device_gpu_smoke --device cuda --size 256
+python -m pytest -q
+```
+
+有 GPU 时，pytest 会额外验证 CUDA 下 batch=1/2 的五个输出、所有训练参数的有限梯度及图卷积参数更新。SNIC 分割和 KNN 构图仍使用 CPU。
 
 ## 规模与边界
 

@@ -1,4 +1,4 @@
-"""Offline CPU integration test with synthetic images, not an accuracy benchmark."""
+"""Run preprocessing, training, resume and prediction on synthetic images using CPU or CUDA."""
 import argparse
 import json
 from pathlib import Path
@@ -8,11 +8,13 @@ import time
 import numpy as np
 from PIL import Image, ImageDraw
 import torch
+from runtime import configure
 
 ROOT = Path(__file__).resolve().parent
 
 
-def run(work_dir, size=64, encoder="vgg19", encoder_checkpoint=None):
+def run(work_dir, size=64, encoder="vgg19", encoder_checkpoint=None, device="cpu"):
+    device = configure(device)
     if encoder != "vgg19" and not encoder_checkpoint:
         raise ValueError("EGNet smoke tests require --encoder-checkpoint")
     encoder_args = ["--encoder", encoder, "--weights", "none"]
@@ -39,11 +41,12 @@ def run(work_dir, size=64, encoder="vgg19", encoder_checkpoint=None):
     (work / "predict.txt").write_text("image_2.png\n")
 
     def command(script, *args):
-        subprocess.run([sys.executable, str(ROOT / script), *map(str, args)], check=True, cwd=ROOT)
+        subprocess.run([sys.executable, str(ROOT / script), *map(str, args),
+                        "--device", str(device)], check=True, cwd=ROOT)
 
     for split in ("train", "val", "predict"):
         command("pre_process.py", "--manifest", work / f"{split}.txt", "--out-dir", work / split,
-                *encoder_args, "--size", size, "--segments", 50, 100, "--device", "cpu")
+                *encoder_args, "--size", size, "--segments", 50, 100)
     command("Main.py", "--data", work / "train", "--val-data", work / "val",
             "--out-dir", work / "model", "--epochs", 1, "--batch-size", 2)
     command("Main.py", "--data", work / "train", "--val-data", work / "val",
@@ -57,7 +60,10 @@ def run(work_dir, size=64, encoder="vgg19", encoder_checkpoint=None):
     assert (work / "model/best.pt").is_file()
     with Image.open(work / "predictions/000000.png") as prediction:
         assert prediction.mode == "L" and prediction.size == (86, 66)
-    summary = {"status": "passed", "device": "cpu", "size": size, "segments": [50, 100],
+    summary = {"status": "passed", "device": str(device), "size": size, "segments": [50, 100],
+               "environment": {"python": sys.version.split()[0], "torch": str(torch.__version__),
+                               "cuda_runtime": torch.version.cuda,
+                               "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None},
                "knn": 32, "encoder": state["config"]["encoder"],
                "encoder_weights": "local checkpoint" if encoder_checkpoint else "random, seed=0 (smoke only)",
                "train_images": 2, "validation_images": 1, "prediction_images": 1,
@@ -74,5 +80,6 @@ if __name__ == "__main__":
     p.add_argument("--size", type=int, default=64)
     p.add_argument("--encoder", choices=["vgg19", "egnet-vgg16", "egnet-resnet50"], default="vgg19")
     p.add_argument("--encoder-checkpoint")
+    p.add_argument("--device", default="cpu", help="cpu, cuda, or a GPU index such as cuda:0")
     args = p.parse_args()
-    run(args.work_dir, args.size, args.encoder, args.encoder_checkpoint)
+    run(args.work_dir, args.size, args.encoder, args.encoder_checkpoint, args.device)
