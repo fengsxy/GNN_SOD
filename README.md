@@ -1,145 +1,179 @@
-# GNN_SOD：可在 CPU 运行的修复版
+# GNN_SOD
 
-光学遥感图像显著性检测：CNN 离线特征 → 多尺度 SNIC 图 → GatedEdgeConv 解码器 → 显著图。
+基于多尺度图卷积的光学遥感图像显著性检测。模型先提取 CNN 特征，通过 SNIC 超像素分割构建多尺度图，再融合图卷积特征与 CNN 特征，输出显著性图。
 
-本版本补齐原仓库缺失的预处理接口，并修复 CPU、数据缓存、通道、尺寸及批处理问题。**这是运行流程修复，不是论文精度复现。** 原始 `Solver`、在 EORSSD 上微调过的编码器权重和训练配方未提供；默认分支显式使用 torchvision VGG19，F6 采用 pool5，加载 ImageNet 权重；离线自检使用固定随机权重。另外提供可选 EGNet VGG16+Conv6 和 ResNet50+ConvertLayer 编码器，均已用官方 DUTS 显著性训练权重验证。两者与文稿所写 VGG19 的冲突尚未确认，因此不自动替换默认分支。完整差异见 [修复说明](docs/CPU_REPAIR.md)。
+项目提供预处理、训练、断点续训和预测脚本，支持 VGG19、EGNet VGG16 和 EGNet ResNet50 三种编码器，可选择 CPU 或 NVIDIA GPU。
 
 ## 安装
 
-已在 Linux、Python 3.12、CPU 上验证。建议使用独立环境：
+环境配置：
+
+| 组件 | CPU | NVIDIA GPU |
+|---|---|---|
+| Python | 3.12 | 3.12 |
+| PyTorch | 2.5.1+cpu | 2.5.1+cu124 |
+| torchvision | 0.20.1+cpu | 0.20.1+cu124 |
+| PyTorch Geometric | 2.6.1 | 2.6.1 |
+| CUDA 运行时 | — | 12.4 |
+
+CPU 和 GPU 分别使用 [requirements-cpu.txt](requirements-cpu.txt) 与 [requirements-gpu.txt](requirements-gpu.txt)，两者都包含 [公共依赖](requirements.txt)。测试依赖在 [requirements-dev.txt](requirements-dev.txt)。PyTorch 版本组合参考[官方安装说明](https://pytorch.org/get-started/previous-versions/#v251)。
+
+以下为 Linux x86_64 安装命令。在项目目录中创建 Python 3.12 环境：
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -r requirements-dev.txt
 ```
 
-这里只使用 PyG 的基础 MessagePassing，不需要另行编译 torch-scatter/torch-sparse。
+然后按设备选择一种安装方式。
 
-## 一条命令检查完整流程
+CPU：
 
 ```bash
-python smoke_test.py --work-dir runs/smoke
+python -m pip install -r requirements-cpu.txt
 ```
 
-该命令生成 3 张合成图，实际调用 SNIC、VGG19、训练及预测入口，覆盖：
-
-- 2 张训练图（含空掩码）、1 张独立验证图，以及无标签预测清单；
-- batch size 2 训练，然后 batch size 1 从检查点继续训练；
-- 五个监督输出的 BCE + SSIM + IoU 损失、验证 MAE、检查点读写；
-- 预测显著图恢复到原图尺寸，输出 PNG 和路径映射 JSON。
-
-默认用 64×64 加快自检。验证论文输入尺寸：
+NVIDIA GPU（需要支持 CUDA 12.4 的驱动，先确认 `nvidia-smi` 能识别显卡）：
 
 ```bash
-python smoke_test.py --work-dir runs/smoke256 --size 256
-python -m pytest -q
+python -m pip install -r requirements-gpu.txt
+python -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'GPU available:', torch.cuda.is_available())"
 ```
 
-每次使用新的空工作目录。结果保存在 `runs/smoke256/smoke_result.json`。**合成图的损失和 MAE 不能用作论文实验结果。** 自检不需要下载数据集或预训练权重。
+GPU 环境最后一项应为 `True`。本项目使用的 PyG 运算无需另外安装 torch-scatter 或 torch-sparse。
 
-## 准备真实数据
+## 快速体验
 
-本仓库不包含 EORSSD 数据、原始微调权重或已经训练好的显著性模型。将获得的数据组织成图像/掩码，并为每个划分建立 UTF-8 清单。例如 `data/train.txt`：
+```bash
+python smoke_test.py --work-dir runs/demo
+```
+
+在 GPU 上运行：
+
+```bash
+python smoke_test.py --work-dir runs/demo_gpu --device cuda --size 256
+```
+
+脚本会生成三张合成示例图，完成预处理、训练、续训和预测，无需准备数据或下载权重。预测图保存在 `runs/demo/predictions/`，运行结果保存在 `runs/demo/smoke_result.json`。
+
+输出位置随 `--work-dir` 改变，运行结果也会记录设备和 PyTorch/CUDA 版本。默认使用 64×64 输入以缩短运行时间，可加 `--size 256` 使用完整输入尺寸。重复运行时，换一个新的 `--work-dir`。
+
+所有运行脚本都接受 `--device`，默认是 `cpu`。GPU 用 `--device cuda`，多卡机器可用 `--device cuda:1` 指定一张卡。下面的数据处理、训练和预测示例使用 CPU；在每条命令后加上 GPU 参数即可切换。SNIC 分割和 KNN 构图仍在 CPU 上执行，CNN 特征提取与图网络计算使用所选设备。
+
+## 选择编码器
+
+| 编码器 | `--encoder` | 预训练权重 |
+|---|---|---|
+| VGG19（默认） | `vgg19` | ImageNet 权重，首次运行自动下载 |
+| EGNet VGG16＋Conv6 | `egnet-vgg16` | `epoch_vgg.pth`，在 DUTS 上训练 |
+| EGNet ResNet50＋通道转换 | `egnet-resnet50` | `epoch_resnet.pth`，在 DUTS 上训练 |
+
+使用 EGNet 时，下载 [官方模型包](https://drive.google.com/open?id=17Ffc6V5EiujtcFKupsJXhtlQ3cLK5OGp)，将解压得到的两个 `.pth` 文件放到 `weights/` 目录。用以下命令体验 ResNet 分支：
+
+```bash
+python smoke_test.py --work-dir runs/resnet_demo --size 256 \
+  --encoder egnet-resnet50 --encoder-checkpoint weights/epoch_resnet.pth
+```
+
+体验 VGG16 时，将编码器改为 `egnet-vgg16`，权重改为 `weights/epoch_vgg.pth`，并使用新的工作目录。两种 EGNet 编码器也通过 `--device cuda` 使用 GPU。
+
+## 准备数据
+
+将 EORSSD 或其他带显著性掩码的数据集整理成图像和掩码，并分别建立 `data/train.txt`、`data/val.txt`、`data/test.txt`。
+
+训练和验证清单每行包含一张图像及其掩码：
 
 ```text
 images/train_0001.jpg masks/train_0001.png
 images/train_0002.jpg masks/train_0002.png
-"images/name with spaces.jpg" "masks/name with spaces.png"
 ```
 
-路径相对于**清单所在目录**解析，也可使用绝对路径。每行一张图；训练/验证必须同时有掩码，推理只需第一列。掩码为灰度二值图，支持 0/255 和 0/1；图像与掩码的原始尺寸必须相同。空白行和 `#` 注释可用。不同划分使用不同缓存目录。
+预测清单可以只写图像路径：
+
+```text
+images/test_0001.jpg
+images/test_0002.jpg
+```
+
+路径相对于清单所在目录解析，例如第一行图像位于 `data/images/train_0001.jpg`；也可以使用绝对路径。带空格的路径用双引号包围。掩码使用单通道 0/255 或 0/1 二值图，尺寸与对应图像一致。训练和验证使用不同的图像。
+
+## 预处理
+
+预处理会提取并缓存 CNN 特征、超像素标签和图结构，后续训练直接读取缓存。
 
 ```bash
-python pre_process.py --manifest data/train.txt --out-dir runs/train_cache --device cpu
-python pre_process.py --manifest data/val.txt --out-dir runs/val_cache --device cpu
-python pre_process.py --manifest data/test.txt --out-dir runs/test_cache --device cpu
+python pre_process.py --manifest data/train.txt --out-dir runs/train_cache
+python pre_process.py --manifest data/val.txt --out-dir runs/val_cache
+python pre_process.py --manifest data/test.txt --out-dir runs/test_cache
 ```
 
-默认 `--size 256 --segments 50 100 --knn 32 --weights imagenet --threads 2`。首次使用 ImageNet 权重会下载 torchvision 的 VGG19 权重（约 550 MB）。SNIC 的参数是目标区域数，实际区域数受网格播种影响，不一定恰好为 50/100；程序会打印实际数量。训练、验证和预测必须使用同一编码器和同一组预处理参数。
+以上命令默认使用 VGG19。使用 EGNet 时，在每条预处理命令末尾添加对应参数：
 
-若有按本版本 `FeatureEncoder` 结构训练的编码器，可使用：
+| 编码器 | 添加的参数 |
+|---|---|
+| VGG16 | `--encoder egnet-vgg16 --encoder-checkpoint weights/epoch_vgg.pth` |
+| ResNet50 | `--encoder egnet-resnet50 --encoder-checkpoint weights/epoch_resnet.pth` |
 
-```bash
-python pre_process.py --manifest data/train.txt --out-dir runs/train_cache --encoder-checkpoint encoder.pt
-```
+默认输入尺寸为 256×256，超像素目标数量为 50/100，K 为 32。可通过 `--size`、`--segments`、`--knn` 调整；程序会打印 SNIC 实际生成的区域数量。
 
-`encoder.pt` 应为 `FeatureEncoder.state_dict()`，或 `{"encoder_state": state_dict}`。加载采用严格键名/尺寸检查；未知结构的旧 `epoch_resnet.pth` 不会被自动转换。本版本**没有补造原编码器的微调过程**。更换编码器后需重新生成所有缓存并重新训练解码器。`--weights none --seed 0` 仅供调试，不能作为论文预训练模型。
-
-## 可选 EGNet VGG16 显著性预训练编码器
-
-已下载并验证 [EGNet 官方模型包](https://drive.google.com/open?id=17Ffc6V5EiujtcFKupsJXhtlQ3cLK5OGp)。解压得到 `epoch_vgg.pth` 与 `epoch_resnet.pth`，此适配器使用前者。该权重经过 DUTS 显著性训练，包含额外的三层 Conv6 卷积；它与仅有 ImageNet 初始化的 `vgg16_20M.pth` 不同，也不能冒充 EORSSD 微调模型。
-
-```bash
-python pre_process.py --manifest data/train.txt --out-dir runs/egnet_train --encoder egnet-vgg16 --encoder-checkpoint /path/to/epoch_vgg.pth
-python pre_process.py --manifest data/test.txt --out-dir runs/egnet_test --encoder egnet-vgg16 --encoder-checkpoint /path/to/epoch_vgg.pth
-python Main.py --data runs/egnet_train --out-dir runs/egnet_model --epochs 20 --batch-size 2
-python predict.py --data runs/egnet_test --checkpoint runs/egnet_model/latest.pt --out-dir runs/egnet_predictions
-```
-
-适配器保留官方 3×3 池化、三层 Conv6 和 BGR/像素均值预处理，只加载经过严格键名/尺寸校验的编码器权重；EGNet 自己的显著性/边缘解码器不参与本图网络。真实权重测试中，适配器的七个输出特征与官方 `vgg.py` 的对应特征逐元素完全一致。不同编码器的缓存不得混用。来源、对应关系及实测见 [EGNet 核验记录](docs/EGNET_CHECK.md)。
-
-## 可选 EGNet ResNet50 显著性预训练编码器
-
-使用同一官方模型包中的 `epoch_resnet.pth`。此分支严格加载 ResNet50 主干和训练过的 ConvertLayer，将五级通道从 64/256/512/1024/2048 转为 128/256/512/512/512，支持现有图网络的 1536 维节点输入和四级 CNN 融合。
-
-```bash
-python smoke_test.py --work-dir runs/resnet_smoke --size 256 --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
-```
-
-这条命令使用本地官方权重，生成合成样本并测试完整预处理、batch 2 训练、batch 1 续训、验证选模和预测。真实数据使用：
-
-```bash
-python pre_process.py --manifest data/train.txt --out-dir runs/resnet_train --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
-python pre_process.py --manifest data/test.txt --out-dir runs/resnet_test --encoder egnet-resnet50 --encoder-checkpoint /path/to/epoch_resnet.pth
-python Main.py --data runs/resnet_train --out-dir runs/resnet_model --epochs 20 --batch-size 2
-python predict.py --data runs/resnet_test --checkpoint runs/resnet_model/latest.pt --out-dir runs/resnet_predictions
-```
-
-EGNet 的 ResNet 并非 torchvision 默认结构：下采样 stride 位于 bottleneck 的第一个 1×1 卷积，最大池化采用 ceil_mode，layer4 取消下采样并使用 dilation=2。适配器保留这些行为，官方参考特征对比通过；不使用随机通道投影，也不加载 EGNet 自带的显著性解码器。256 输入时的五级空间尺寸为 128/65/33/17/17，与文稿 VGG 六个 Block 的尺寸不完全相同。代码能运行不等于确认了原论文的主干身份。详细结果见 [ResNet 核验](docs/EGNET_RESNET_CHECK.md)。
+同一次实验的训练、验证和预测使用相同的编码器、权重和预处理参数。切换编码器或参数后，使用新的缓存目录重新预处理，并重新训练图网络。
 
 ## 训练与续训
 
 ```bash
-python Main.py --data runs/train_cache --val-data runs/val_cache --out-dir runs/model --epochs 20 --batch-size 2 --device cpu
+python Main.py --data runs/train_cache --val-data runs/val_cache \
+  --out-dir runs/model --epochs 20 --batch-size 2
 ```
 
-默认学习率 0.005、Adam、weight decay 0，继承原训练脚本；默认 batch size 为文稿中的 4，上例用 2 降低 CPU 内存需求。`--threads` 可调节 CPU 线程数。实际训练时间和内存随图像大小、批量大小、设备变化，自检耗时不代表完整 EORSSD 训练耗时。
-
-- `latest.pt`：最近一轮的模型、优化器、随机状态、缓存配置和训练历史。
-- `best.pt`：提供验证集时，按验证 MAE 选择的检查点。
-- `history.json`：每轮训练损失和可选验证 MAE。这里的 MAE 在预处理后的尺寸上计算，仅用于验证选模。
-
-不提供 `--val-data` 也能训练，但只保存 `latest.pt`，不把训练损失作为验证结果。训练和验证清单不得共享同一路径的图像；不要用测试集选模。
+训练使用 Adam，默认学习率为 0.005。上例将 batch size 设为 2，适合先在 CPU 上运行；可根据内存或显存调整 `--batch-size`，通过 `--threads` 调整 CPU 线程数。例如，使用 GPU、batch size 为 4：
 
 ```bash
-python Main.py --data runs/train_cache --val-data runs/val_cache --out-dir runs/model --epochs 30 --batch-size 2 --resume runs/model/latest.pt
+python Main.py --data runs/train_cache --val-data runs/val_cache \
+  --out-dir runs/model_gpu --epochs 20 --batch-size 4 --device cuda
 ```
 
-`--epochs` 是训练总轮数。续训恢复检查点中的优化器设置（包括学习率）；CPU 随机状态也会恢复。
+训练目录包含：
+
+| 文件 | 内容 |
+|---|---|
+| `latest.pt` | 最近一轮的模型和优化器状态，用于续训 |
+| `best.pt` | 验证集 MAE 最低的模型，用于预测 |
+| `history.json` | 每轮训练损失和验证 MAE |
+
+没有验证集时，省略 `--val-data`，训练会保存 `latest.pt` 和训练历史。
+
+从第 20 轮继续训练到第 30 轮：
+
+```bash
+python Main.py --data runs/train_cache --val-data runs/val_cache \
+  --out-dir runs/model --epochs 30 --batch-size 2 --resume runs/model/latest.pt
+```
+
+`--epochs` 表示总轮数。续训会恢复优化器设置，包括检查点中的学习率。
 
 ## 预测
 
 ```bash
-python predict.py --data runs/test_cache --checkpoint runs/model/best.pt --out-dir runs/predictions --device cpu
+python predict.py --data runs/test_cache --checkpoint runs/model/best.pt \
+  --out-dir runs/predictions
 ```
 
-没有验证集时，改用 `latest.pt`。输出 `000000.png` 等单通道 8-bit 显著图，尺寸与各自原图一致；`predictions.json` 记录输出文件与输入图像的对应关系。支持 `--batch-size`，输入清单可没有标签。
+如果训练时没有使用验证集，将 `best.pt` 改为 `latest.pt`。
 
-缓存和检查点记录编码器权重摘要、图尺度、K、图构造方式、尺寸和特征接口，不兼容时会明确报错。旧版本 `.pkl` 不兼容此版本，需从原图重建缓存并重新训练。首版 CPU 修复的 format_version=1 检查点复用了首级融合特征，当前按图 2 改为逐级融合并使用 format_version=2，旧解码器检查点需重新训练；兼容的特征缓存可继续使用。缓存、模型和预测输出不纳入 Git。
+预测结果为单通道灰度 PNG，尺寸恢复为各自原图的大小。`predictions.json` 记录输出文件与输入图像的对应关系。可通过 `--batch-size` 设置预测批量大小。
 
-## 方法接口
+预处理缓存和预测输出使用空目录；再次运行时指定新的 `--out-dir` 即可。
 
-| 用途 | 默认 VGG19 特征（EGNet 可选分支见上文） | 通道/输出 |
-|---|---|---|
-| 图节点 | F4=relu4_4、F5=relu5_4、F6=pool5；双线性放大后 sigmoid、区域均值 | 1536 |
-| 四级 CNN 融合 | F5、F4、F3=relu3_4、F2=relu2_2 | 512、512、256、128 |
-| 各尺度图卷积 | 保留原 GatedEdgeConv 和 GraphSizeNorm | 64→32→16→8 |
-| 多尺度融合 | 各分支相加、1×1 卷积；按图 2 和式（6）逐级传入上一层融合特征 | 32、16、8、4 |
-| 显著性输出 | 四个侧输出和一个融合输出 | 均为 `[B,1,H,W]` |
+## 测试与实现文档
 
-坐标只用于构图，不混入 1536 维 CNN 节点特征。图权重与原代码一致：归一化质心距离经 `exp(-distance / (0.1*pi)^2)` 加权，再执行原来的列/行两遍 KNN 稀疏化，去掉自环。该操作不保证每个节点最后恰有 K 条边，也不保证图对称。
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
 
-评审要求的跨数据集实验、核心模块消融、参数敏感性、完整复杂度指标及近期方法比较，仍需在真实数据上另行完成；本次修复不构成这些实验结果。
+测试覆盖图反投影、梯度、批处理、损失和检查点读写。有可用 GPU 时，测试也会检查 CUDA 下 batch=1/2 的前向、反向和参数更新。提供官方权重及参考代码后，还可运行 EGNet 特征一致性测试；具体设置见以下文档。
+
+- [实现说明与版本兼容](docs/CPU_REPAIR.md)
+- [CPU 测试记录](docs/CPU_VALIDATION.md)
+- [EGNet VGG16 权重与特征接口](docs/EGNET_CHECK.md)
+- [EGNet ResNet50 权重与特征接口](docs/EGNET_RESNET_CHECK.md)

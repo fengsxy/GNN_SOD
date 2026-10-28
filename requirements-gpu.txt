@@ -1,0 +1,6 @@
+# NVIDIA CUDA 12.4 wheels (Linux/Windows x86_64).
+# Requires an NVIDIA driver compatible with CUDA 12.4.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+-r requirements.txt

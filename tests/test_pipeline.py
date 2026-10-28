@@ -51,15 +51,19 @@ def make_sample(node_counts):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_every_branch_trains_with_variable_node_counts(batch_size):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA device unavailable"))])
+def test_every_branch_trains_with_variable_node_counts(batch_size, device):
     samples = [make_sample((5, 7)), make_sample((8, 11))][:batch_size]
     batch = next(iter(DataLoader(samples, batch_size=batch_size)))
-    model = GCN()
+    batch = [graph.to(device) for graph in batch]
+    model = GCN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=.001)
     before = [branch[0].linB.weight.detach().clone() for branch in model.graph_layers]
     outputs = model(batch)
     assert len(outputs) == 5
     assert all(t.shape == (batch_size, 1, 32, 32) for t in outputs)
+    assert all(t.device.type == device for t in outputs)
     loss = sum(mixed_loss(t, batch[0].y) for t in outputs)
     loss.backward()
     for name, parameter in model.named_parameters():
