@@ -1,111 +1,110 @@
+"""Train the graph decoder from cached VGG19/SNIC features on CPU or CUDA."""
+import argparse
+import json
+from pathlib import Path
 import torch
-import torch.nn as nn
-import pytorch_ssim
-import pytorch_iou
-from Model import  GCN
 from torch_geometric.loader import DataLoader
-import os, pickle
-import torch.optim as optim
-from torch.nn import CrossEntropyLoss
-from Dataset import MyDataset,PyGDatareader
+from Dataset import MyDataset
+from Model import GCN
+from losses import mixed_loss
+from runtime import check_config, configure
 
 
+@torch.no_grad()
+def validate(model, loader, device):
+    model.eval()
+    error, count = 0.0, 0
+    for graphs in loader:
+        graphs = [graph.to(device) for graph in graphs]
+        pred = model(graphs)[-1]
+        error += (pred - graphs[0].y).abs().mean((1, 2, 3)).sum().item()
+        count += pred.shape[0]
+    return error / count
 
 
-def PyGDatareader__traintest_merge(path):
-    graph_Dataset = []
-    path_list = os.listdir(path)
-    for i in path_list:
-        file_path = os.path.join(path, i)
-        train_graphdata = PyGDatareader(file_path)
-        graph_Dataset.extend(train_graphdata)
-    return graph_Dataset
+def train(args):
+    device = configure(args.device, args.threads, args.seed)
+    if args.epochs < 1 or args.batch_size < 1 or args.lr <= 0:
+        raise ValueError("Epochs, batch size and learning rate must be positive")
+    dataset = MyDataset(args.data)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = None
+    if args.val_data:
+        val_data = MyDataset(args.val_data)
+        check_config(dataset.config, val_data.config)
+        train_paths = {s["image_path"] for s in dataset.samples}
+        if train_paths.intersection(s["image_path"] for s in val_data.samples):
+            raise ValueError("Training and validation manifests share images")
+        val_loader = DataLoader(val_data, batch_size=args.batch_size, num_workers=0)
+    model = GCN(dataset.config["node_channels"], len(dataset.config["segments"])).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0)
+    start, best, history = 0, float("inf"), []
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
+        check_config(checkpoint["config"], dataset.config)
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start, best = checkpoint["epoch"], checkpoint["best_val_mae"]
+        history = checkpoint["history"]
+        torch.set_rng_state(checkpoint["rng_state"])
+        if start >= args.epochs:
+            raise ValueError("--epochs is the total epoch count and must exceed the resumed epoch")
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if (out / "latest.pt").exists() and not args.resume:
+        raise ValueError("Output has a checkpoint; use --resume or a new --out-dir")
+    for epoch in range(start + 1, args.epochs + 1):
+        model.train()
+        total, seen = 0.0, 0
+        for graphs in loader:
+            graphs = [graph.to(device) for graph in graphs]
+            optimizer.zero_grad(set_to_none=True)
+            outputs = model(graphs)
+            loss = sum(mixed_loss(prediction, graphs[0].y) for prediction in outputs)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Non-finite training loss")
+            loss.backward()
+            if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+                raise FloatingPointError("Non-finite gradient")
+            optimizer.step()
+            batch = graphs[0].num_graphs
+            total += loss.item() * batch
+            seen += batch
+        record = {"epoch": epoch, "train_loss": total / seen, "samples": seen,
+                  "steps": len(loader)}
+        improved = False
+        if val_loader:
+            record["val_mae"] = validate(model, val_loader, device)
+            improved = record["val_mae"] < best
+            best = min(best, record["val_mae"])
+        history.append(record)
+        checkpoint = {"format_version": 1, "config": dataset.config, "epoch": epoch,
+                      "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
+                      "best_val_mae": best, "history": history, "rng_state": torch.get_rng_state()}
+        temporary = out / "latest.tmp.pt"
+        torch.save(checkpoint, temporary)
+        temporary.replace(out / "latest.pt")
+        if improved:
+            torch.save(checkpoint, out / "best.pt")
+        (out / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+        print(json.dumps(record), flush=True)
+    return history
 
 
-
-bce_loss = nn.BCELoss(reduction='mean')
-ssim_loss = pytorch_ssim.SSIM(window_size=11, size_average=True)
-iou_loss = pytorch_iou.IOU(size_average=True)
-
-
-def muti_loss(pred, target):
-    bce_out = bce_loss(pred, target)
-    ssim_out = 1 - ssim_loss(pred, target)
-    iou_out = iou_loss(pred, target)
-    loss = bce_out + ssim_out + iou_out
-    return loss
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--data", required=True)
+    p.add_argument("--val-data")
+    p.add_argument("--out-dir", required=True)
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--lr", type=float, default=.005)
+    p.add_argument("--resume")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--threads", type=int, default=2)
+    p.add_argument("--seed", type=int, default=0)
+    return p
 
 
 if __name__ == "__main__":
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(device)
-    path = "./TXT/data_mini_processed"
-    trainset = MyDataset(path)  # Combines a train_data
-
-    batch_size = 1
-
-    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=0)
-
-    model = GCN().to(device)
-
-    #model.load_state_dict(torch.load("./model/model_09_Finall_test_30.pkl"))
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.005, betas=(0.9, 0.999),
-                           eps=1e-08, weight_decay=0, amsgrad=False)
-    epoch_num = 20
-    max = 999999999.0
-    for epoch in range(epoch_num):  # loop over the dataset multiple times
-        training_loss = 0.0
-        loss = 0
-        flag = 1
-        img_name_list = []
-        txt_path = "./TXT/EORSSD_test.txt"
-        fh = open(txt_path, 'r')
-        for line in fh:
-            line = line.rstrip()  # remove the "space" in the end of the string line.
-            words = line.split()  # split the line into serval string with "space".
-            # file_name = words[1].split('/')[-2]  # word[0] is the image path, word[1] is the gt path
-            file_name = words[1].split('/')[-2]
-            img_name = words[1].split('/')[-1]
-            img_name_list.append(file_name + '/' + img_name)
-        for batch_idx, gt_graph_sp_PyGdata in enumerate(trainloader, 0):
-            gt_graph_sp_PyGdata_1, gt_graph_sp_PyGdata_2, gt_graph_sp_PyGdata_3 = gt_graph_sp_PyGdata[0]
-            gt = gt_graph_sp_PyGdata_1.y  # get the batch groundtruth labels (tensor: B*H*W)
-
-            n_imgs = gt.shape[0]
-            gt_graph_sp_PyGdata_1 = gt_graph_sp_PyGdata_1.to(device)
-            gt_graph_sp_PyGdata_2 = gt_graph_sp_PyGdata_2.to(device)
-            gt_graph_sp_PyGdata_3 = gt_graph_sp_PyGdata_3.to(device)
-            # zero the parameter gradients
-            optimizer.zero_grad()  # clear the grad in the optimizer.
-            # de-batch the outputs
-            batch_1 = gt_graph_sp_PyGdata_1.batch
-            batch_2 = gt_graph_sp_PyGdata_2.batch
-            batch_3 = gt_graph_sp_PyGdata_3.batch
-
-            x_sdf_out, x_sdf_2_out, x_sdf_3_out, x_sdf_4_out, salmaps = model(
-                data_list=(gt_graph_sp_PyGdata_1, gt_graph_sp_PyGdata_2, gt_graph_sp_PyGdata_3),
-                batch_list=(batch_1, batch_2, batch_3))  # return a tensor BN*C
-
-            gtlist = []
-            for i in range(0, n_imgs):
-                gtlist.append(gt[i].squeeze(0))
-            gts = torch.cat(gtlist, dim=0)
-
-            gts = gts.reshape(int(gts.shape[0] / gts.shape[1]), gts.shape[1], gts.shape[1])
-
-            loss_fn = CrossEntropyLoss()  # self-defined loss function, call loss to compute.
-            loss_1 = muti_loss(salmaps, gt.cuda(0))
-            loss_2 = muti_loss(x_sdf_out, gt.cuda(0))
-            loss_3 = muti_loss(x_sdf_2_out, gt.cuda(0))
-            loss_4 = muti_loss(x_sdf_3_out, gt.cuda(0))
-            loss_5 = muti_loss(x_sdf_4_out, gt.cuda(0))
-            loss = loss_1 + loss_2 + loss_3 + loss_4 + loss_5
-
-            loss.backward()  # compute the grad.
-
-            training_loss += loss.item()
-            optimizer.step()  # update the weight using the grad.
-            # print('aa is ', aa)
-        if max > training_loss:
-            torch.save(model.state_dict(), "./model/model_09_100_300_cat" + '_' + '%d.pkl' % (epoch))
-            max = training_loss
+    train(parser().parse_args())
